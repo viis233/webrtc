@@ -16,11 +16,7 @@ class VideoChat {
     this.dataChannelConnected = false;
     this.rtcConfig = {
       iceServers: [
-
-        {
-          urls: "stun:stun.axialys.net:3478",
-        },
-
+        { urls: "stun:stun.l.google.com:19302" },
       ],
     };
   }
