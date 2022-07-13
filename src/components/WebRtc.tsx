@@ -1,17 +1,33 @@
 import React, { useEffect, useRef, useState } from "react";
 import io, { Socket } from "socket.io-client";
 
+type UserInfo={
+  id:string,
+  name:string
+}
+type DataChannelData={
+  type:"init"|"data"
+  data:any
+}
+
 class VideoChat {
   private peer: null | RTCPeerConnection;
   private ws: Socket | null;
-  private localMedia: null | MediaStream;
+  public localMedia: null | MediaStream;
+  public remoteMedia: null | MediaStream;
   private rtcConfig: RTCConfiguration;
   private dataChannel: RTCDataChannel | null;
-  private dataChannelConnected: Boolean;
+  public dataChannelConnected: Boolean;
+  public selfInfo: UserInfo|null;
+  public remoteInfo: UserInfo|null;
+
   constructor() {
+    this.selfInfo=null
+    this.remoteInfo=null
     this.ws = null;
     this.peer = null;
     this.localMedia = null;
+    this.remoteMedia = null;
     this.dataChannel = null;
     this.dataChannelConnected = false;
     this.rtcConfig = {
@@ -24,12 +40,12 @@ class VideoChat {
   async init(ws: Socket, getLocalMedia?: () => Promise<MediaStream>) {
     this.ws = ws;
     this.ws.on("iceCandidate", ({ iceCandidate }: any) => {
-      console.log("远端添加iceCandidate");
+      console.log("remote add iceCandidate");
       this.peer && this.peer.addIceCandidate(new RTCIceCandidate(iceCandidate));
     });
     // 呼叫被接受
     this.ws.on("answer", ({ answer }: any) => {
-      console.log("answer");
+      console.log("setRemoteDescription");
       this.peer && this.peer.setRemoteDescription(answer);
     });
     this.localMedia = await (getLocalMedia
@@ -37,9 +53,23 @@ class VideoChat {
         : this.getLocalMedia());
   }
 
+  setSelfInfo(info:UserInfo){
+    this.selfInfo =info
+  }
+  sendSelfInfo(){
+    this.dataChannel?.send(JSON.stringify({type:"init",data:this.selfInfo}))
+  }
+
+  setRemoteInfo(info:UserInfo){
+    this.remoteInfo =info
+  }
+
   // 创建RTC
   createLocalPeer() {
     this.peer = new RTCPeerConnection(this.rtcConfig);
+    this.peer.addEventListener("icecandidateerror",(e)=>{
+      console.log("icecandidateerror",e)
+    })
     return this;
   }
 
@@ -47,6 +77,7 @@ class VideoChat {
   addTrack() {
     if (!this.peer || !this.localMedia) return;
     // this.localMedia.getTracks().forEach(track => this.peer.addTrack(track, this.localMedia));
+    // @ts-ignore
     this.peer?.addStream(this.localMedia);
     return this;
   }
@@ -72,10 +103,9 @@ class VideoChat {
     return answer;
   }
 
-  listenerAddStream(cb: any) {
+  listenerAddStream() {
     this.peer?.addEventListener("addstream", (event: any) => {
-      console.log("addstream事件触发", event.stream);
-      cb && cb(event.stream);
+      this.remoteMedia=event.stream
     });
     return this;
   }
@@ -97,7 +127,7 @@ class VideoChat {
     this.peer?.addEventListener("icecandidate", (event) => {
       const iceCandidate = event.candidate;
       if (iceCandidate) {
-        console.log("发送candidate给远端");
+        console.log("send candidate to remote");
         cb && cb(iceCandidate);
       }
     });
@@ -110,38 +140,53 @@ class VideoChat {
     });
     return this;
   }
-  createDataChannel(onMessage: (event: MessageEvent) => void, label = "data") {
+  createDataChannel(onMessage: (event: DataChannelData) => void, label = "data") {
     console.log("createDataChannel");
     if (this.peer) {
       this.dataChannel = this.peer.createDataChannel(label);
       this.dataChannel.onopen = () => {
         console.log("datachannel open");
         this.dataChannelConnected = true;
+        this.sendSelfInfo()
       };
       this.dataChannel.onclose = () => {
         console.log("datachannel close");
         this.dataChannel = null;
         this.dataChannelConnected = false;
       };
-      this.dataChannel.onmessage = onMessage;
+      this.dataChannel.onmessage = (event: MessageEvent)=>{
+        console.log(this.selfInfo,event)
+        const data:DataChannelData = JSON.parse(event.data)
+        if (data.type==="init"){
+          this.remoteInfo=data.data
+        }
+        return onMessage(data)
+      };
     }
     return this;
   }
-  receiveDataChannel(onMessage: (event: MessageEvent) => void) {
-    console.log("receiveDataChannel");
+  createReceiveDataChannel(onMessage: (data: DataChannelData) => void) {
+    console.log("createReceiveDataChannel");
     if (this.peer) {
       this.peer.ondatachannel = (e) => {
         this.dataChannel = e.channel;
         this.dataChannel.onopen = () => {
           console.log("datachannel open");
           this.dataChannelConnected = true;
+          this.sendSelfInfo()
         };
         this.dataChannel.onclose = () => {
           console.log("datachannel close");
           this.dataChannel = null;
           this.dataChannelConnected = false;
         };
-        this.dataChannel.onmessage = onMessage;
+        this.dataChannel.onmessage = (event: MessageEvent)=>{
+          const data:DataChannelData = JSON.parse(event.data)
+          if (data.type==="init"){
+            this.remoteInfo=data.data
+          }
+          return onMessage(data)
+        };
       };
     }
     return this;
@@ -158,7 +203,7 @@ class VideoChat {
 export const useWS = (spaceName = "/", headers = {}) => {
   const [ws, setWs] = useState<Socket>();
   useEffect(() => {
-    console.log("ws connect", import.meta.env.VITE_APP_WEBSOCKET_URL);
+    console.log("ws connecting", import.meta.env.VITE_APP_WEBSOCKET_URL);
     const ws = io(import.meta.env.VITE_APP_WEBSOCKET_URL + spaceName, {
       forceNew: true,
       path: import.meta.env.VITE_APP_WEBSOCKET_PATH,
@@ -175,100 +220,160 @@ export const useWS = (spaceName = "/", headers = {}) => {
   return ws;
 };
 
-export const WebRtcUser: React.FC<{
+type ConsoleRobot = { id: string; name: string,chat:VideoChat|null }
+export const WebRtcConsole: React.FC<{
   adminInfo?: {
     id: string;
     name: string;
   };
 }> = ({ adminInfo = { id: "admin", name: "admin" } }) => {
   const ws = useWS("/webrtc", { ...adminInfo, isRobot: false });
-  const [robotList, setRobotList] = useState<[{ id: string; name: string }]>();
+  const [robotList, setRobotList] = useState<ConsoleRobot[]|undefined>();
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
-  const chat = new VideoChat();
+
   useEffect(() => {
     if (ws) {
       ws.on("called", async (callingInfo) => {
+        const chat = new VideoChat();
         chat.createLocalPeer();
-
-        chat.receiveDataChannel((event) => {
-          console.log("receive message :", event.data);
+        chat.setSelfInfo(adminInfo)
+        chat.createReceiveDataChannel((data) => {
+          console.log("get message from ",chat.remoteInfo?.name,data)
         });
-
         chat.listenerGatheringstatechange();
-
         chat.listenerCandidateAdd((iceCandidate: any) => {
           ws.emit("iceCandidate", { iceCandidate, toId: callingInfo.fromId });
         });
-
-        chat.listenerAddStream((stream: any) => {
-          if (remoteVideoRef.current) {
-            remoteVideoRef.current.srcObject = stream;
-          }
-        });
-
+        chat.listenerAddStream();
         const answer = await chat.createAnswer(callingInfo.offer);
-
         ws.emit("answer", { answer, toId: callingInfo.fromId });
+
+        setRobotList((old)=>{
+          return old && old.map(i => {
+            if (i.id === callingInfo.fromId) {
+              i.chat = chat
+            }
+            return i
+          })
+        })
       });
       ws.on("update_robot_list", ({ robotList }) => {
-        setRobotList(robotList);
+
+        setRobotList((old)=>{
+          if (old){
+            return robotList.map((i:ConsoleRobot)=>{
+              return {...i,chat:old.find((j)=>j.id=i.id)?.chat}
+            })
+          }
+          return  robotList
+        });
       });
     }
   }, [ws]);
   const connectDrive = (driveId: string) => {
-    console.log("connectDrive", driveId);
     ws &&
     ws.emit(
         "connect_drive",
         {
           driveId,
         },
-        (data: any) => {
-          console.log("data", data);
-        }
     );
   };
-
+  const disconnectDrive = (driveId: string) => {
+    setRobotList((old)=>{
+      return old && old.map(i => {
+        if (i.id === driveId) {
+          i.chat = null
+        }
+        return i
+      })
+    })
+  };
   return (
       <div>
-        {robotList &&
+        {robotList && robotList.length>0?
             robotList.map((i) => {
               return (
-                  <div key={i.name}>
-                    robot {i.name}
-                    <button
-                        onClick={() => {
-                          connectDrive(i.id);
-                        }}
-                    >
-                      connect
-                    </button>
-                  </div>
-              );
-            })}
-        <video width={300} height={200} autoPlay={true} ref={remoteVideoRef} />
+                  <CRobot connectDrive={connectDrive} disconnectDrive ={disconnectDrive} robotInfo={i} key={i.id}/>
+              )
+            }) : "not robot online"}
+        <video width={300} height={200} autoPlay={true} ref={remoteVideoRef}/>
       </div>
   );
 };
 
+export const CRobot: React.FC<{ connectDrive: (id: string) => void, disconnectDrive: (id: string) => void, robotInfo: ConsoleRobot }>
+    = ({connectDrive,disconnectDrive, robotInfo}
+) => {
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    if (remoteVideoRef.current && robotInfo.chat) {
+      remoteVideoRef.current.srcObject = robotInfo.chat!.remoteMedia
+    }
+  })
+
+  return <div>
+    <div key={robotInfo.name}>
+      robot[{robotInfo.name}]
+      {robotInfo.chat?<button
+          onClick={() => {
+            disconnectDrive(robotInfo.id);
+          }}
+      >
+        disconnect
+      </button>:<button
+          onClick={() => {
+            connectDrive(robotInfo.id);
+          }}
+      >
+        connect
+      </button>}
+      <div>
+        {robotInfo.chat?.remoteMedia && <video ref={remoteVideoRef} width={300} height={200} autoPlay={true}/>}
+      </div>
+    </div>
+  </div>
+}
+
+
+
+export const RobotInit = () => {
+  const [robotInfo, setRobotInfo] = useState<any>();
+  return <div>
+    inputRobotName<input id={"robotId"}/>
+    <button onClick={() => {
+      const t: any = document.getElementById("robotId")
+      setRobotInfo({...{
+          id: t.value,
+          name: t.value
+        }})
+    }
+    }>create robot
+    </button>
+    {robotInfo && <Robot key={robotInfo.id}
+                         robotInfo={robotInfo}/>}
+  </div>
+
+}
 export const Robot: React.FC<{
   robotInfo: {
     id: string;
     name: string;
   };
-  onRobotGetMessage: (event: MessageEvent) => void;
   getLocalMedia?: () => Promise<MediaStream>;
-}> = ({ robotInfo, getLocalMedia, onRobotGetMessage }) => {
+}> = ({ robotInfo, getLocalMedia }) => {
   const ws = useWS("/webrtc", { ...robotInfo, isRobot: true });
   const chat = new VideoChat();
   useEffect(() => {
     if (ws) {
       ws.on("create_webrtc", async (data) => {
         await chat.init(ws, getLocalMedia);
-
+        chat.setSelfInfo(robotInfo)
         chat.createLocalPeer();
 
-        chat.createDataChannel(onRobotGetMessage);
+        chat.createDataChannel((data)=>{
+          console.log("get message from ",chat.remoteInfo?.name,data)
+        });
 
         chat.addTrack();
 
@@ -286,14 +391,18 @@ export const Robot: React.FC<{
         ws.emit("offer", { offer, toId: data.fromId });
       });
     }
-  }, [ws]);
+  }, [ws,robotInfo.id]);
 
   return (
       <div>
-        robot {robotInfo.name}
+        robot[{robotInfo.name}]
+        <input id={"input"}/>
         <button
             onClick={() => {
-              chat.sendData("robot message");
+              // @ts-ignore
+              const input:HTMLInputElement = document.getElementById("input")
+              input && chat.sendData(JSON.stringify({type:"data",data:input.value}));
+              input.value=""
             }}
         >
           send data
