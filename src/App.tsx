@@ -6,7 +6,7 @@ function App() {
   return (
       <Router>
           <Switch>
-              <Route exact path="/">
+              <Route exact path="/console">
                   <WebRtcConsole />
               </Route>
               <Route exact path="/robot">
